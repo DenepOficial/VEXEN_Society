@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     allowed_roles: str = ""
 
     database_url: str = ""
-    society_db_schema: str = "vexen_society_dev"
+    society_db_schema: str = "vexen_society"
 
     verification_integration: str = "disabled"
     vexmod_roles_schema: str = "vexmod_temp_roles"
