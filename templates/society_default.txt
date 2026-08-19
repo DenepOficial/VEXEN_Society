@@ -1,0 +1,18 @@
+# VEXEN SOCIETY
+# Plantilla general
+
+[CATEGORY] 👥 { VXS } { asociado } { comunidad }
+
+[ANN] 📢┃anuncios
+[TXT] 💬┃general
+[STAFF-TXT] 🛡️┃staff-chat
+[TXT] 🎟️┃soporte
+[TXT] 🖥️┃plataformas
+[TXT] 💡┃sugerencias
+
+[VOICE] 🔊 ┃ General
+[VOICE] 🎮 ┃ Gaming
+[VOICE] 🎙️ ┃ Voz 1
+[VOICE] 🎙️ ┃ Voz 2
+[VOICE] 🎙️ ┃ Voz 3
+[STAFF-VOICE] 🔐 ┃ Staff
