@@ -69,6 +69,7 @@ class VexenSocietyBot(commands.Bot):
             VerificationIntegration | None
         ) = None
         self.onboarding_integration: OnboardingIntegration | None = None
+        self._staff_permissions_reconciled = False
 
     async def setup_hook(
         self,
@@ -173,6 +174,29 @@ class VexenSocietyBot(commands.Bot):
 
         if self.settings.guild_id is not None:
             for guild in list(self.guilds):
+                if guild.id == self.settings.guild_id:
+                    if not self._staff_permissions_reconciled:
+                        try:
+                            report = (
+                                await self.space_service.refresh_staff_category_permissions(
+                                    guild
+                                )
+                            )
+                            self._staff_permissions_reconciled = True
+                            log.info(
+                                "Permisos Staff Society sincronizados: "
+                                "%d categorías, %d canales Staff, %d faltantes, %d fallos.",
+                                report["categories_updated"],
+                                report["staff_channels_updated"],
+                                report["missing"],
+                                report["failed"],
+                            )
+                        except Exception:
+                            log.exception(
+                                "No se pudieron sincronizar los permisos Staff Society."
+                            )
+                    continue
+
                 if (
                     guild.id
                     != self.settings.guild_id

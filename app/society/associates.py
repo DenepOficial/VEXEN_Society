@@ -25,6 +25,8 @@ from app.society.templates import (
     template_from_row,
 )
 from app.society.welcome import (
+    disable_welcome_button,
+    publish_welcome,
     refresh_announcement_button_styles,
     refresh_welcome_button_styles,
 )
@@ -114,6 +116,12 @@ class SocietyCog(commands.Cog):
         parent=society,
     )
 
+    bienvenida = app_commands.Group(
+        name="bienvenida",
+        description="Gestiona las bienvenidas de Society",
+        parent=society,
+    )
+
     async def _admin(
         self,
         interaction: discord.Interaction,
@@ -159,6 +167,14 @@ class SocietyCog(commands.Cog):
                 "`/society asociado listar` — ver asociados registrados\n"
                 "`/society asociado info` — consultar una Society\n"
                 "`/society asociado eliminar` — eliminación segura"
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="🎉 Bienvenidas • Admin",
+            value=(
+                "`/society bienvenida reenviar` — republicar la bienvenida de un asociado"
             ),
             inline=False,
         )
@@ -217,6 +233,129 @@ class SocietyCog(commands.Cog):
 
         await interaction.response.send_message(
             embed=embed,
+            ephemeral=True,
+        )
+
+    @bienvenida.command(
+        name="reenviar",
+        description="Republica la bienvenida de una Society existente",
+    )
+    @app_commands.describe(
+        asociado="Asociado cuya bienvenida quieres volver a publicar"
+    )
+    async def resend_welcome(
+        self,
+        interaction: discord.Interaction,
+        asociado: discord.Member,
+    ) -> None:
+        if not await self._admin(interaction):
+            return
+
+        await interaction.response.defer(
+            ephemeral=True,
+            thinking=True,
+        )
+
+        row = await get_associate(
+            self.bot.db,
+            self.settings.society_db_schema,
+            interaction.guild_id,
+            asociado.id,
+        )
+        if row is None:
+            await interaction.followup.send(
+                "❌ Ese usuario no está registrado como asociado.",
+                ephemeral=True,
+            )
+            return
+
+        space = await get_associate_space(
+            self.bot.db,
+            self.settings.society_db_schema,
+            interaction.guild_id,
+            asociado.id,
+        )
+        if space is None or space["status"] != "active":
+            await interaction.followup.send(
+                "❌ La Society de ese asociado no está activa.",
+                ephemeral=True,
+            )
+            return
+
+        configured_channel_id = await get_welcome_channel(
+            self.bot.db,
+            self.settings.society_db_schema,
+            interaction.guild_id,
+        )
+        if not configured_channel_id:
+            await interaction.followup.send(
+                "❌ No hay un canal de bienvenida configurado. "
+                "Usa `/society config canal_bienvenida`.",
+                ephemeral=True,
+            )
+            return
+
+        community_role_id = space["community_role_id"]
+        if (
+            not community_role_id
+            or interaction.guild.get_role(community_role_id) is None
+        ):
+            await interaction.followup.send(
+                "❌ El rol de comunidad ya no existe.",
+                ephemeral=True,
+            )
+            return
+
+        old_space = space
+        message, error = await publish_welcome(
+            self.bot,
+            self.settings,
+            interaction.guild,
+            asociado.id,
+            row["display_name"],
+            row["community_name"],
+            community_role_id,
+            interaction.user.id,
+        )
+
+        if message is None:
+            await interaction.followup.send(
+                "❌ No se pudo republicar la bienvenida."
+                + (f"\n`{error}`" if error else ""),
+                ephemeral=True,
+            )
+            return
+
+        # Solo después de confirmar la nueva publicación desactivamos el
+        # botón de la bienvenida anterior. El mensaje viejo se conserva.
+        await disable_welcome_button(
+            self.bot,
+            self.settings,
+            interaction.guild,
+            old_space,
+            row["community_name"],
+        )
+
+        await add_audit_log(
+            self.bot.db,
+            self.settings.society_db_schema,
+            interaction.guild_id,
+            "WELCOME_REPUBLISHED",
+            interaction.user.id,
+            asociado.id,
+            row["community_name"],
+            {
+                "new_welcome_channel_id": message.channel.id,
+                "new_welcome_message_id": message.id,
+                "previous_welcome_channel_id": old_space["welcome_channel_id"],
+                "previous_welcome_message_id": old_space["welcome_message_id"],
+            },
+        )
+
+        await interaction.followup.send(
+            "✅ Bienvenida republicada correctamente para "
+            f"{asociado.mention} en {message.channel.mention}.\n"
+            f"[Ir al mensaje]({message.jump_url})",
             ephemeral=True,
         )
 

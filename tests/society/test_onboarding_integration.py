@@ -3,9 +3,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_requires_discord_py_26():
+def test_requires_discord_py_27():
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
-    assert "discord.py>=2.6,<3" in requirements
+    assert "discord.py>=2.7,<3" in requirements
 
 
 def test_onboarding_uses_public_discord_py_api_and_int_role():

@@ -11,6 +11,7 @@ from app.integrations.verification import VerificationIntegration
 from app.society.permissions import (
     apply_staff_only,
     base_category_overwrites,
+    staff_overwrite,
 )
 from app.society.template_parser import ParsedTemplate, render_category_name
 from app.society.templates import template_from_row
@@ -28,6 +29,7 @@ from database import (
     get_associate_channel,
     get_associate_space,
     list_associate_channels,
+    list_associates,
     save_associate_channel,
     save_associate_space,
     set_associate_space_status,
@@ -69,6 +71,92 @@ class SpaceService:
             (guild_id, user_id),
             asyncio.Lock(),
         )
+
+    async def refresh_staff_category_permissions(
+        self,
+        guild: discord.Guild,
+    ) -> dict[str, int]:
+        """Aplica el paquete Staff actual a Society existentes.
+
+        Los canales normales heredan el overwrite de la categoría. Los
+        canales STAFF-TXT/STAFF-VOICE tienen overwrite propio y también se
+        actualizan para mantener el mismo paquete de permisos.
+        """
+        counters = {
+            "categories_updated": 0,
+            "staff_channels_updated": 0,
+            "missing": 0,
+            "failed": 0,
+        }
+
+        rows = await list_associates(
+            self.db,
+            self.settings.society_db_schema,
+            guild.id,
+        )
+
+        for row in rows:
+            if row["status"] != "active":
+                continue
+
+            category_id = row["category_id"]
+            staff_role_id = row["staff_role_id"]
+            if not category_id or not staff_role_id:
+                counters["missing"] += 1
+                continue
+
+            category = guild.get_channel(category_id)
+            staff_role = guild.get_role(staff_role_id)
+            if (
+                not isinstance(category, discord.CategoryChannel)
+                or staff_role is None
+            ):
+                counters["missing"] += 1
+                continue
+
+            try:
+                await category.set_permissions(
+                    staff_role,
+                    overwrite=staff_overwrite(),
+                    reason=(
+                        "VEXEN Society: actualizar permisos locales de Staff"
+                    ),
+                )
+                counters["categories_updated"] += 1
+            except (discord.Forbidden, discord.HTTPException):
+                counters["failed"] += 1
+                continue
+
+            channel_rows = await list_associate_channels(
+                self.db,
+                self.settings.society_db_schema,
+                guild.id,
+                row["user_id"],
+            )
+            for channel_row in channel_rows:
+                if channel_row["channel_type"] not in {
+                    "STAFF-TXT",
+                    "STAFF-VOICE",
+                }:
+                    continue
+
+                channel = guild.get_channel(channel_row["channel_id"])
+                if channel is None:
+                    continue
+
+                try:
+                    await channel.set_permissions(
+                        staff_role,
+                        overwrite=staff_overwrite(),
+                        reason=(
+                            "VEXEN Society: actualizar permisos de canal Staff"
+                        ),
+                    )
+                    counters["staff_channels_updated"] += 1
+                except (discord.Forbidden, discord.HTTPException):
+                    counters["failed"] += 1
+
+        return counters
 
     async def create_space(
         self,
@@ -1109,6 +1197,13 @@ class SpaceService:
             if row["is_template"]
         }
 
+        # Sincronizar también los permisos Staff de la categoría existente.
+        await category.set_permissions(
+            staff_role,
+            overwrite=staff_overwrite(),
+            reason="VEXEN Society: sincronizar permisos Staff",
+        )
+
         created = 0
 
         for definition in parsed.channels:
@@ -1123,6 +1218,18 @@ class SpaceService:
                 )
                 is not None
             ):
+                existing_channel = guild.get_channel(
+                    current["channel_id"]
+                )
+                if (
+                    definition.channel_type in {"STAFF-TXT", "STAFF-VOICE"}
+                    and existing_channel is not None
+                ):
+                    await existing_channel.set_permissions(
+                        staff_role,
+                        overwrite=staff_overwrite(),
+                        reason="VEXEN Society: sincronizar canal Staff",
+                    )
                 continue
 
             channel = (
