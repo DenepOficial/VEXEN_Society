@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import discord
@@ -94,6 +95,83 @@ class AnnouncementsCog(commands.Cog):
         content = "\n".join(parts).strip()
         return content or None
 
+    SOCIAL_RELAY_POLL_DELAYS = (0.0, 0.15, 0.35, 0.65)
+
+    async def _published_social_event_for_message(
+        self,
+        message: discord.Message,
+    ):
+        # Solo acepta social_events reales y publicados; is_test=True queda fuera.
+        if self.bot.db is None or message.guild is None:
+            return None
+
+        schema = self.settings.society_db_schema
+        relation = await self.bot.db.fetchval(
+            "SELECT to_regclass($1)",
+            f"{schema}.social_events",
+        )
+        if relation is None:
+            return None
+
+        return await self.bot.db.fetchrow(
+            f'''SELECT event_id, associate_user_id, provider, event_type
+                FROM "{schema}".social_events
+                WHERE guild_id=$1
+                  AND discord_channel_id=$2
+                  AND discord_message_id=$3
+                  AND is_test=FALSE
+                  AND status='published'
+                LIMIT 1''',
+            message.guild.id,
+            message.channel.id,
+            message.id,
+        )
+
+    async def _wait_for_real_social_event(
+        self,
+        message: discord.Message,
+    ):
+        # El evento Gateway puede llegar unas décimas antes de que el worker
+        # guarde discord_message_id. Estos reintentos cierran esa carrera.
+        for delay in self.SOCIAL_RELAY_POLL_DELAYS:
+            if delay:
+                await asyncio.sleep(delay)
+            row = await self._published_social_event_for_message(message)
+            if row is not None:
+                return row
+        return None
+
+    @staticmethod
+    def _link_view_from_message(
+        message: discord.Message,
+    ) -> discord.ui.View | None:
+        # Copia solo botones Link del anuncio social, p. ej. ▶ VER STREAM.
+        view = discord.ui.View(timeout=None)
+        added = 0
+        for row_index, action_row in enumerate(message.components[:5]):
+            for component in getattr(action_row, "children", ()):
+                if getattr(component, "style", None) != discord.ButtonStyle.link:
+                    continue
+                url = getattr(component, "url", None)
+                label = getattr(component, "label", None)
+                if not url or not label:
+                    continue
+                kwargs = {
+                    "label": str(label)[:80],
+                    "style": discord.ButtonStyle.link,
+                    "url": str(url),
+                    "disabled": bool(getattr(component, "disabled", False)),
+                    "row": min(row_index, 4),
+                }
+                emoji = getattr(component, "emoji", None)
+                if emoji is not None:
+                    kwargs["emoji"] = emoji
+                view.add_item(discord.ui.Button(**kwargs))
+                added += 1
+                if added >= 25:
+                    return view
+        return view if added else None
+
     async def _relay_message(
         self,
         message: discord.Message,
@@ -101,19 +179,35 @@ class AnnouncementsCog(commands.Cog):
     ) -> discord.WebhookMessage:
         webhook = await self._get_or_create_relay_webhook(target)
         files = await self._attachment_files(message)
-        return await webhook.send(
-            content=self._message_content(message),
-            username=message.author.display_name[:80],
-            avatar_url=str(message.author.display_avatar.url),
-            files=files,
-            allowed_mentions=discord.AllowedMentions(
+
+        send_kwargs = {
+            "content": self._message_content(message),
+            "username": message.author.display_name[:80],
+            "avatar_url": str(message.author.display_avatar.url),
+            "files": files,
+            "allowed_mentions": discord.AllowedMentions(
                 everyone=False,
                 users=True,
                 roles=True,
                 replied_user=False,
             ),
-            wait=True,
-        )
+            "wait": True,
+        }
+
+        # Los anuncios manuales mantienen el relay histórico. Para mensajes
+        # sociales automáticos del propio VEXEN conservamos embed y Link buttons.
+        if message.author.bot:
+            embeds = [
+                discord.Embed.from_dict(embed.to_dict())
+                for embed in message.embeds[:10]
+            ]
+            if embeds:
+                send_kwargs["embeds"] = embeds
+            link_view = self._link_view_from_message(message)
+            if link_view is not None:
+                send_kwargs["view"] = link_view
+
+        return await webhook.send(**send_kwargs)
 
     async def _send_join_message(
         self,
@@ -333,7 +427,6 @@ class AnnouncementsCog(commands.Cog):
     async def on_message(self, message: discord.Message) -> None:
         if (
             message.guild is None
-            or message.author.bot
             or message.webhook_id is not None
             or self.bot.db is None
         ):
@@ -360,6 +453,23 @@ class AnnouncementsCog(commands.Cog):
         )
         if associate is None:
             return
+
+        if message.author.bot:
+            # Nunca retransmitimos bots externos ni mensajes normales del propio
+            # VEXEN. Solo eventos sociales reales registrados por el worker.
+            if self.bot.user is None or message.author.id != self.bot.user.id:
+                return
+            social_event = await self._wait_for_real_social_event(message)
+            if social_event is None:
+                return
+            if int(social_event["associate_user_id"]) != int(associate["user_id"]):
+                log.warning(
+                    "Se ignoró un anuncio social porque no coincide el asociado "
+                    "del canal. message_id=%s event_id=%s",
+                    message.id,
+                    social_event["event_id"],
+                )
+                return
 
         target = message.guild.get_channel(target_id)
         if not isinstance(target, discord.TextChannel):
